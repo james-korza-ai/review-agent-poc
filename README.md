@@ -63,6 +63,19 @@ Run the **Six-fixture evaluation** workflow manually on `main`. It reviews each
 of the six synthetic cases three times with the same model, then scores exact
 rule/file/line matches. The answer key is read only after model calls. Requests,
 raw responses, results and the scorecard are retained as a one-day artifact.
-Failed or rejected-output trials never count as quiet successes; there are no
-automatic retries. The proposed acceptance bar is labelled provisional until
+Failed or rejected-output trials never count as quiet successes. Evaluation uses
+`bounded-transient-retry-v1`: at most two physical attempts per logical trial,
+only after HTTP 429/503 or an actual timeout. Valid answers, schema errors, other
+HTTP errors and general transport errors are never retried. Every attempt keeps
+its request, outcome and available raw receipts; prior batches remain separate.
+The `/review` workflow still makes a single attempt.
+
+Bounds are 15 minutes per batch, 245 seconds per logical trial, 120 seconds and
+16,000 reserved tokens per physical attempt, at most 36 calls, and 32,000 reserved
+tokens per logical trial. Calls start at least 5.1 seconds apart; an exhausted
+service stops the batch. The HTTP wall deadline runs on the Unix main thread.
+Failed calls with unavailable usage make aggregate cost and token totals unknown,
+even if every logical quality trial completes. The original complete-cost bar
+then remains unmet; known estimates are not an invoice or provider spend cap.
+The proposed acceptance bar is labelled provisional until
 the team agrees it. Passing these fixtures does not graduate the rule to blocking.
