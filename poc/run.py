@@ -144,8 +144,17 @@ def run_request(request_path, result_path, skill_dir, *, allow_live=False):
         write_json(result_path, result)
         return 0
     except (RuntimeError, ValueError, TypeError, KeyError, OSError) as exc:
+        safe_codes = {"model_transport_failed", "model_usage_invalid", "model_usage_missing",
+                      "model_response_unfinished", "model_response_nontext", "model_response_no_text",
+                      "model_receipt_invalid", "model_decode_invalid", "model_redirect_refused",
+                      "model_configuration_missing", "model_configuration_invalid",
+                      "model_credential_missing", "model_budget_exceeded"}
+        code = getattr(exc, "code", "review_failed")
+        if not isinstance(code, str) or not (code in safe_codes or re.fullmatch(r"model_http_[1-5][0-9]{2}", code)):
+            code = "review_failed"
         diagnostic = {"status": "failed", "request_id": request_id, "error_type": type(exc).__name__,
-                      "message": "Review did not complete. No new result was produced. Check input paths, policy and model access; live calls are disabled by default."}
+                      "error_code": code,
+                      "message": "Review did not complete; no result was published. See the safe error code."}
         try:
             if own_diagnostic:
                 diagnostic_path.unlink()
@@ -153,7 +162,7 @@ def run_request(request_path, result_path, skill_dir, *, allow_live=False):
         except (ValueError, OSError):
             # Refuse overwrites and do not expose exception text or credentials.
             pass
-        print("review failed; no new result produced (see diagnostic sidecar)", file=sys.stderr)
+        print(f"review failed ({code}); no result published", file=sys.stderr)
         return 2
 
 
