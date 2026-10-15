@@ -164,6 +164,20 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(sidecar["status"], "failed")
         self.assertEqual(sidecar["error_type"], "RuntimeError")
 
+    def test_safe_failure_code_is_retained_without_raw_exception(self):
+        self.build()
+        runner = self.runner()
+        for index, value in enumerate(("model_http_404", "secret-value\nother")):
+            failure = RuntimeError("never echo synthetic-key or model body")
+            failure.code = value
+            result_path = self.output / f"failure-code-{index}.json"
+            with patch("poc.check_runner.run_check", side_effect=failure):
+                self.assertEqual(runner.run_request(self.output / "request.json", result_path, ROOT), 2)
+            sidecar = json.loads(Path(str(result_path) + ".diagnostics.json").read_text())
+            self.assertEqual(sidecar["error_code"], "model_http_404" if index == 0 else "review_failed")
+            self.assertNotIn("synthetic-key", json.dumps(sidecar))
+            self.assertFalse(result_path.exists())
+
     def test_empty_diff_skips_model_and_tests_are_excluded(self):
         self.build(base=self.head)
         runner = self.runner()

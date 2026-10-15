@@ -82,7 +82,34 @@ class GeminiLiveTests(unittest.TestCase):
             self.call()
         self.assertNotIn('synthetic-unit-key', str(raised.exception))
         self.assertNotIn('sensitive', str(raised.exception))
+        self.assertEqual(getattr(raised.exception, 'code', None), 'model_http_429')
         self.assertEqual(len(self.requests), 1)
+
+    def test_http_status_is_preserved_as_safe_code_without_provider_error_details(self):
+        for status in (400, 401, 403, 404, 429, 500):
+            self.failure = urllib.error.HTTPError('https://example.invalid/?key=synthetic-unit-key',
+                status, 'sensitive provider body', {}, None)
+            with self.subTest(status=status), self.assertRaises(adapter.OperationalError) as raised:
+                self.call()
+            self.assertEqual(getattr(raised.exception, 'code', None), f'model_http_{status}')
+            self.assertNotIn('synthetic-unit-key', str(raised.exception))
+            self.assertNotIn('sensitive', str(raised.exception))
+
+    def test_transport_and_usage_failures_have_distinct_safe_codes(self):
+        self.failure = urllib.error.URLError('sensitive synthetic-unit-key')
+        with self.assertRaises(adapter.OperationalError) as raised:
+            self.call()
+        self.assertEqual(getattr(raised.exception, 'code', None), 'model_transport_failed')
+        self.failure = None
+        self.response['usageMetadata']['totalTokenCount'] = 119
+        with self.assertRaises(adapter.OperationalError) as raised:
+            self.call()
+        self.assertEqual(getattr(raised.exception, 'code', None), 'model_usage_invalid')
+
+    def test_operational_error_default_and_invalid_codes_are_safe(self):
+        self.assertEqual(getattr(adapter.OperationalError('generic'), 'code', None), 'review_failed')
+        error = adapter.OperationalError('generic', code='https://example.invalid/?key=synthetic-unit-key')
+        self.assertEqual(error.code, 'review_failed')
 
     def test_unfinished_missing_or_inconsistent_usage_cannot_produce_estimate(self):
         for mutation in ('blocked', 'missing', 'bad-total', 'negative-thinking', 'tool-use', 'wrong-thinking'):
