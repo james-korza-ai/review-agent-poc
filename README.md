@@ -56,3 +56,13 @@ for comparison. Their results are not GitHub Actions results or quality trials.
 ```sh
 python3 -m unittest discover -s tests -v
 ```
+
+## Eighteen-run evaluation
+
+Run the **Six-fixture evaluation** workflow manually on `main`. It reviews each
+of the six synthetic cases three times with the same model, then scores exact
+rule/file/line matches. The answer key is read only after model calls. Requests,
+raw responses, results and the scorecard are retained as a one-day artifact.
+Failed or rejected-output trials never count as quiet successes; there are no
+automatic retries. The proposed acceptance bar is labelled provisional until
+the team agrees it. Passing these fixtures does not graduate the rule to blocking.
