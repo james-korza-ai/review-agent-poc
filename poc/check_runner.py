@@ -57,6 +57,24 @@ def _valid_finding(row, source):
     return True
 
 
+def _omit_invalid_columns(row, source):
+    """Drop optional column hints only; the strict validator still checks lines."""
+    if not isinstance(row, dict) or not isinstance(row.get('location'), dict):
+        return False
+    loc = row['location']
+    values = [loc.get(key) for key in ('start_line', 'end_line', 'start_col', 'end_col')]
+    if any(type(value) is not int for value in values):
+        return False
+    start, end, start_col, end_col = values
+    if not 1 <= start <= end <= len(source) or min(start_col, end_col) < 0:
+        return False
+    if (start_col > len(source[start - 1]) + 1 or end_col > len(source[end - 1]) + 1
+            or start == end and start_col and end_col and end_col < start_col):
+        loc.update(start_col=0, end_col=0)
+        return True
+    return False
+
+
 def run_check(request, skill, *, allow_live=False):
     try:
         root = checked_path(request['repo']['root']).resolve(strict=True)
@@ -98,8 +116,10 @@ def run_check(request, skill, *, allow_live=False):
         rows = json.loads(response['text'])
         if not isinstance(rows, list):
             raise OperationalError('Model output must be a JSON array')
-        findings = []; dropped = 0
+        findings = []; dropped = 0; columns_omitted = 0
         for row in rows:
+            row = copy.deepcopy(row)
+            omitted = _omit_invalid_columns(row, source)
             if not _valid_finding(row, source):
                 dropped += 1
                 continue
@@ -107,9 +127,10 @@ def run_check(request, skill, *, allow_live=False):
             result['location']['path'] = path
             result.update(id=f'finding-{len(findings) + 1}', confidence=None, enforcing=False)
             findings.append(result)
-        provenance = {'engine_version': 'poc-0.1', 'image_digest': '',
+            columns_omitted += int(omitted)
+        provenance = {'engine_version': 'poc-0.1.1', 'image_digest': '',
                       **{key: response[key] for key in ('model', 'duration_ms', 'tokens', 'cost_usd')}}
-        return {'findings': findings, 'dropped': dropped, 'provenance': provenance,
+        return {'findings': findings, 'dropped': dropped, 'columns_omitted': columns_omitted, 'provenance': provenance,
                 'receipts': {'raw_model_response': response.get('raw_response'), 'model_context': context,
                              'alias_map': {'review.go': path}, 'cost_basis': response['receipt_basis']}}
     except (KeyError, TypeError, ValueError, OSError, UnicodeError):
