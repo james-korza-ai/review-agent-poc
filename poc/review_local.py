@@ -3,6 +3,7 @@
 This is an explicit local trigger, not a webhook or always-on service. Source
 clone Git objects must already contain the actual GitHub base/head commits.
 Default is private output; --post publishes one advisory PR issue comment.
+With --inline, --post publishes a COMMENT review with validated diff anchors.
 No approval, required status, hosted check, or quality scorecard is produced.
 """
 import argparse
@@ -57,6 +58,7 @@ def _identity(repo, pr, comment_id, metadata, pull, comment):
 def _text(value):
     # PR/model text cannot inject HTML or notify arbitrary mentioned accounts.
     escaped = html.escape(str(value), quote=False).replace("@", "&#64;")
+    escaped = " ".join(escaped.splitlines())
     # Keep findings as literal text within the controller-owned Markdown links.
     return re.sub(r"([\\`*_{}\[\]()!|])", r"\\\1", escaped)
 
@@ -82,7 +84,71 @@ def _report(repo, pr, comment_id, head, result):
     return "\n".join(lines) + "\n"
 
 
-def review_local(repo, pr, comment_id, out, skill_dir, source_repo, *, post=False):
+def _pages(endpoint):
+    """Read every page; gh transport remains the only external boundary."""
+    page = 1
+    while True:
+        rows = _gh(f"{endpoint}?per_page=100&page={page}")
+        if not isinstance(rows, list):
+            raise ValueError("GitHub list response is invalid")
+        yield from rows
+        if len(rows) < 100:
+            return
+        page += 1
+
+
+def _right_lines(patch):
+    """Return only added/context right-side lines in complete unified hunks."""
+    if not isinstance(patch, str) or not patch:
+        raise ValueError("inline anchor requires an available PR patch")
+    allowed, old_left, new_left, right, saw_hunk = set(), 0, 0, 0, False
+    for row in patch.splitlines():
+        hunk = re.fullmatch(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@.*", row)
+        if hunk:
+            if old_left or new_left:
+                raise ValueError("inline anchor patch hunk is incomplete")
+            old_left, new_left = int(hunk[2] or 1), int(hunk[4] or 1)
+            right, saw_hunk = int(hunk[3]), True
+            continue
+        if row == "\\ No newline at end of file":
+            continue
+        if not saw_hunk or not row or row[0] not in " +-":
+            raise ValueError("inline anchor patch is invalid")
+        prefix = row[0]
+        if prefix in " -":
+            old_left -= 1
+        if prefix in " +":
+            new_left -= 1
+            allowed.add(right)
+            right += 1
+        if old_left < 0 or new_left < 0:
+            raise ValueError("inline anchor patch hunk is invalid")
+    if not saw_hunk or old_left or new_left:
+        raise ValueError("inline anchor patch hunk is incomplete")
+    return allowed
+
+
+def _inline_comments(repo, pr, result):
+    if not result["findings"]:
+        return []
+    files = {row["filename"]: row for row in _pages(f"repos/{repo}/pulls/{pr}/files")}
+    comments = []
+    for finding in result["findings"]:
+        location = finding["location"]
+        path, line = location["path"], location["start_line"]
+        if type(line) is not int or line <= 0 or path not in files or line not in _right_lines(files[path].get("patch")):
+            raise ValueError("finding has no supported right-side PR diff anchor; private report retained")
+        body = f"**{_text(finding['severity'])}**: {_text(finding['message'])}"
+        suggestion = finding.get("suggestion", {}).get("text")
+        if suggestion:
+            body += f"\n\nSuggested action: {_text(suggestion)}"
+        if len(body) > 65536:
+            raise ValueError("inline report exceeds GitHub comment limit; private report retained")
+        comments.append({"path": path, "line": line, "side": "RIGHT", "body": body})
+    return comments
+
+
+def review_local(repo, pr, comment_id, out, skill_dir, source_repo, *, post=False, inline=False):
     """Consume explicit selected GitHub identity; output must be fresh and owned."""
     if not isinstance(repo, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+", repo):
         raise ValueError("expected selected owner/repository")
@@ -108,7 +174,7 @@ def review_local(repo, pr, comment_id, out, skill_dir, source_repo, *, post=Fals
     base, head = pull["base"]["sha"], pull["head"]["sha"]
     write_json(out / "trigger.json", {"repo": repo, "pr": pr, "comment_id": comment_id,
                "author": comment["user"]["login"], "command": comment["body"], "base_sha": base, "head_sha": head,
-               "trigger": "manual-local", "posting_requested": post})
+               "trigger": "manual-local", "posting_requested": post, "inline_requested": inline})
     build_request(source_repo, base, head, out / "request.json",
                   provider={"name": "github", "repo": repo, "pr_id": str(pr),
                             "pr_url": f"https://github.com/{repo}/pull/{pr}"},
@@ -124,24 +190,26 @@ def review_local(repo, pr, comment_id, out, skill_dir, source_repo, *, post=Fals
     if post:
         if len(report) > 65536:
             raise ValueError("report exceeds GitHub comment limit; private report retained")
-        # Read all existing comments for repeat-invocation protection.
-        page = 1
-        while True:
-            comments = _gh(f"repos/{repo}/issues/{pr}/comments?per_page=100&page={page}")
-            duplicate = next((row for row in comments if f"<!-- local-review:{comment_id}:{head} -->" in row.get("body", "")), None)
+        # Share the marker across issue-comment and review modes so migration
+        # cannot publish the same trigger/head twice. Read both paginated stores.
+        marker = f"<!-- local-review:{comment_id}:{head} -->"
+        for endpoint in (f"repos/{repo}/issues/{pr}/comments", f"repos/{repo}/pulls/{pr}/reviews"):
+            duplicate = next((row for row in _pages(endpoint) if marker in (row.get("body") or "")), None)
             if duplicate:
                 posted_url = duplicate["html_url"]
                 break
-            if len(comments) < 100:
-                break
-            page += 1
         if posted_url is None:
+            comments = _inline_comments(repo, pr, result) if inline else None
             latest = _gh(f"repos/{repo}/pulls/{pr}")
             latest_comment = _gh(f"repos/{repo}/issues/comments/{comment_id}")
             _identity(repo, pr, comment_id, metadata, latest, latest_comment)
             if latest["head"]["sha"] != head or latest["base"]["sha"] != base:
                 raise ValueError("PR commits changed; private report retained, rerun against current commits")
-            posted_url = _gh(f"repos/{repo}/issues/{pr}/comments", method="POST", payload={"body": report})["html_url"]
+            if inline:
+                posted_url = _gh(f"repos/{repo}/pulls/{pr}/reviews", method="POST", payload={
+                    "commit_id": head, "event": "COMMENT", "body": report, "comments": comments})["html_url"]
+            else:
+                posted_url = _gh(f"repos/{repo}/issues/{pr}/comments", method="POST", payload={"body": report})["html_url"]
     summary = {"repo": repo, "pr": pr, "comment_id": comment_id, "head_sha": head,
                "report": str(out / "report.md"), "posted_url": posted_url, "scope": "local advisory demonstration"}
     write_json(out / "publication.json", summary)
@@ -156,10 +224,11 @@ def main(argv=None):
     parser.add_argument("--out", required=True)
     parser.add_argument("--skill-dir", required=True)
     parser.add_argument("--source-repo", required=True)
-    parser.add_argument("--post", action="store_true", help="explicitly publish advisory PR issue comment")
+    parser.add_argument("--post", action="store_true", help="explicitly publish advisory PR report")
+    parser.add_argument("--inline", action="store_true", help="publish a COMMENT review with validated diff anchors when --post is set")
     args = parser.parse_args(argv)
     try:
-        summary = review_local(args.repo, args.pr, args.comment_id, args.out, args.skill_dir, args.source_repo, post=args.post)
+        summary = review_local(args.repo, args.pr, args.comment_id, args.out, args.skill_dir, args.source_repo, post=args.post, inline=args.inline)
         print(json.dumps(summary))
         return 0
     except (ValueError, OSError, KeyError, TypeError, subprocess.SubprocessError):
