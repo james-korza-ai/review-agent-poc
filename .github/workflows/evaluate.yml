@@ -1,0 +1,50 @@
+name: Six-fixture evaluation
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: six-fixture-evaluation
+  cancel-in-progress: false
+jobs:
+  evaluate:
+    if: >-
+      github.repository == 'james-korza-ai/review-agent-poc' &&
+      github.actor == github.repository_owner && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Read trusted engine and synthetic fixtures
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Prepare eighteen blinded requests
+        run: python3 -m poc.evaluate prepare --out "$RUNNER_TEMP/evaluation"
+      - name: Run actual model trials
+        env:
+          MODEL_PROVIDER: gemini
+          MODEL_ID: gemini-3.1-flash-lite
+          MODEL_ENDPOINT: https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent
+          MODEL_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          MODEL_INPUT_USD_PER_MILLION: '0.25'
+          MODEL_OUTPUT_USD_PER_MILLION: '1.50'
+          MODEL_MAX_OUTPUT_TOKENS: '8192'
+          MODEL_COST_BASIS: 'Official standard rates checked 2026-10-15: https://ai.google.dev/gemini-api/docs/pricing ; estimate, not an invoice or spend cap.'
+        run: python3 -m poc.evaluate run --out "$RUNNER_TEMP/evaluation"
+      - name: Score every planned trial
+        if: always()
+        run: python3 -m poc.evaluate score --out "$RUNNER_TEMP/evaluation"
+      - name: Retain raw requests, responses and scorecard
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: six-fixture-evaluation-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/evaluation/results
+            ${{ runner.temp }}/evaluation/manifest.json
+            ${{ runner.temp }}/evaluation/scorecard.json
+            ${{ runner.temp }}/evaluation/pass-bar.json
+            ${{ runner.temp }}/evaluation/readout.md
+          if-no-files-found: error
+          retention-days: 1
