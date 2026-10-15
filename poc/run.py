@@ -14,6 +14,7 @@ import re
 import sys
 
 from . import check_runner
+from .suggestions import lf_lines
 from .build_request import RULE, checked_path, read_regular, relative_path, validate_policy, write_json
 
 
@@ -27,7 +28,7 @@ def load_skill(skill_dir):
     prompt = read_regular(root, "PROMPT.md")
     metadata_text = read_regular(root, "skill.yaml")
     metadata = json.loads(metadata_text)
-    expected = {"name": RULE, "version": "0.4.1", "language": "go", "severity": "medium", "enforce": False,
+    expected = {"name": RULE, "version": "0.5.0", "language": "go", "severity": "medium", "enforce": False,
                 "triggers": {"include": ["**/*.go"], "exclude": ["**/*_test.go"],
                              "diff_contains": "call returning error"}}
     if metadata != expected or metadata["enforce"] is not False or not prompt.strip():
@@ -44,7 +45,7 @@ def trigger(request, diff):
     if not eligible or not diff.strip():
         return False
     # Look only in added/context source lines; removed calls must not fire a review.
-    source = "\n".join(line[1:] for line in diff.splitlines()
+    source = "\n".join(line[1:] for line in lf_lines(diff)
                        if line.startswith(("+", " ")) and not line.startswith("+++"))
     return bool(re.search(r"\b(?:err|error)\s*(?::=|=)\s*[\w.]+\s*\(", source))
 
@@ -121,7 +122,7 @@ def run_request(request_path, result_path, skill_dir, *, allow_live=False):
             status = "ok"
         else:
             checked = {"findings": [], "dropped": 0,
-                       "provenance": {"engine_version": "poc-0.1.1", "image_digest": "", "model": "not-called",
+                       "provenance": {"engine_version": "poc-0.2.0", "image_digest": "", "model": "not-called",
                                       "duration_ms": 0, "tokens": {"in": 0, "out": 0}, "cost_usd": 0}}
             status = "skipped"
         findings = checked["findings"]
@@ -134,6 +135,7 @@ def run_request(request_path, result_path, skill_dir, *, allow_live=False):
         diagnostic = {"status": "completed", "request_id": request_id, "trigger_fired": fired,
                       "dropped": checked["dropped"], "receipts": checked.get("receipts", {}),
                       "columns_omitted": checked.get("columns_omitted", 0),
+                      "suggestions_rejected": checked.get("suggestions_rejected", 0),
                       "scope": "local POC; no graduation or vendor-parity evidence"}
         # Serialization failures must be reported before publishing success diagnostics.
         json.dumps(result, allow_nan=False)

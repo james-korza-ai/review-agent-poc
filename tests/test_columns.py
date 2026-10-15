@@ -36,7 +36,7 @@ class ColumnTests(unittest.TestCase):
                 self.assertEqual(result['findings'][0]['location'],{'path':'bug_02.go','start_line':23,'end_line':23,'start_col':0,'end_col':0})
                 self.assertEqual(row,original)
                 self.assertEqual(json.loads(result['receipts']['raw_model_response']['unchanged-model-text'])[0],original)
-                self.assertEqual(result['provenance']['engine_version'],'poc-0.1.1')
+                self.assertEqual(result['provenance']['engine_version'],'poc-0.2.0')
 
     def test_valid_columns_are_preserved_without_omission(self):
         row=finding(line=23);row['location'].update(start_col=1,end_col=5)

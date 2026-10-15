@@ -7,6 +7,9 @@ With --inline, --post publishes a COMMENT review with validated diff anchors.
 No approval, required status, hosted check, or quality scorecard is produced.
 """
 import argparse
+import base64
+import binascii
+import hashlib
 import html
 import json
 from pathlib import Path
@@ -16,6 +19,8 @@ import sys
 from urllib.parse import quote
 
 from . import run
+from .suggestions import lf_lines, validate_edit
+from .suggestion_compile import compile_suggestion
 from .build_request import _git, build_request, checked_path, read_regular, write_json
 
 
@@ -97,22 +102,25 @@ def _pages(endpoint):
         page += 1
 
 
-def _right_lines(patch):
-    """Return only added/context right-side lines in complete unified hunks."""
+def _right_hunks(patch):
+    """Return separate right-side line sets only for complete unified hunks."""
     if not isinstance(patch, str) or not patch:
         raise ValueError("inline anchor requires an available PR patch")
-    allowed, old_left, new_left, right, saw_hunk = set(), 0, 0, 0, False
-    for row in patch.splitlines():
+    hunks, allowed, old_left, new_left, right = [], None, 0, 0, 0
+    for row in lf_lines(patch):
         hunk = re.fullmatch(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@.*", row)
         if hunk:
             if old_left or new_left:
                 raise ValueError("inline anchor patch hunk is incomplete")
+            if allowed is not None:
+                hunks.append(allowed)
+            allowed = set()
             old_left, new_left = int(hunk[2] or 1), int(hunk[4] or 1)
-            right, saw_hunk = int(hunk[3]), True
+            right = int(hunk[3])
             continue
         if row == "\\ No newline at end of file":
             continue
-        if not saw_hunk or not row or row[0] not in " +-":
+        if allowed is None or not row or row[0] not in " +-":
             raise ValueError("inline anchor patch is invalid")
         prefix = row[0]
         if prefix in " -":
@@ -123,28 +131,99 @@ def _right_lines(patch):
             right += 1
         if old_left < 0 or new_left < 0:
             raise ValueError("inline anchor patch hunk is invalid")
-    if not saw_hunk or old_left or new_left:
+    if allowed is None or old_left or new_left:
         raise ValueError("inline anchor patch hunk is incomplete")
-    return allowed
+    return hunks + [allowed]
 
 
-def _inline_comments(repo, pr, result):
+def _right_lines(patch):
+    return set().union(*_right_hunks(patch))
+
+
+def _pinned_source(repo, path, head_sha):
+    """Read bounded source as data only, at the independently trusted commit."""
+    if not isinstance(head_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", head_sha):
+        return None
+    try:
+        blob = _gh(f"repos/{repo}/contents/{quote(path, safe='/')}?ref={head_sha}")
+        if (not isinstance(blob, dict) or blob.get("type") != "file" or blob.get("path") != path
+                or blob.get("encoding") != "base64" or type(blob.get("size")) is not int
+                or not 0 <= blob["size"] <= 1024 * 1024 or not isinstance(blob.get("content"), str)
+                or len(blob["content"]) > 1500000):
+            return None
+        raw = base64.b64decode("".join(blob["content"].split()), validate=True)
+        expected = hashlib.sha1(f"blob {len(raw)}\0".encode() + raw).hexdigest()
+        if len(raw) != blob["size"] or blob.get("sha") != expected:
+            return None
+        source = raw.decode("utf-8")
+        return None if "\r" in source else source
+    except (ValueError, KeyError, TypeError, UnicodeError, binascii.Error):
+        return None
+
+
+def _inline_comments(repo, pr, result, *, head_sha=None):
     if not result["findings"]:
         return []
     files = {row["filename"]: row for row in _pages(f"repos/{repo}/pulls/{pr}/files")}
-    comments = []
+    prepared, sources = [], {}
     for finding in result["findings"]:
         location = finding["location"]
         path, line = location["path"], location["start_line"]
-        if type(line) is not int or line <= 0 or path not in files or line not in _right_lines(files[path].get("patch")):
+        if type(line) is not int or line <= 0 or path not in files:
+            raise ValueError("finding has no supported right-side PR diff anchor; private report retained")
+        hunks = _right_hunks(files[path].get("patch"))
+        if not any(line in hunk for hunk in hunks):
             raise ValueError("finding has no supported right-side PR diff anchor; private report retained")
         body = f"**{_text(finding['severity'])}**: {_text(finding['message'])}"
-        suggestion = finding.get("suggestion", {}).get("text")
-        if suggestion:
-            body += f"\n\nSuggested action: {_text(suggestion)}"
+        suggestion = finding.get("suggestion", {})
+        if suggestion.get("text"):
+            body += f"\n\nSuggested action: {_text(suggestion['text'])}"
+        edit = None
+        if suggestion.get("edit") is not None:
+            if path not in sources:
+                sources[path] = _pinned_source(repo, path, head_sha)
+            source = sources[path]
+            if source is not None:
+                edit, _ = validate_edit(suggestion["edit"], suggestion.get("replacement"), lf_lines(source))
+                if edit is not None and not any(set(range(edit["start_line"], edit["end_line"] + 1)) <= hunk for hunk in hunks):
+                    edit = None
+        prepared.append((finding, body, edit))
+    # Conflicting edits are both shown as advice. Never make application order
+    # choose which model-proposed code wins within the same pinned file.
+    conflicts = set()
+    for i, (finding, _, edit) in enumerate(prepared):
+        if edit is None:
+            continue
+        for j in range(i):
+            other, _, previous = prepared[j]
+            if previous is not None and finding["location"]["path"] == other["location"]["path"] and max(edit["start_line"], previous["start_line"]) <= min(edit["end_line"], previous["end_line"]):
+                conflicts.update((i, j))
+    comments, compiled = [], 0
+    for i, (finding, body, edit) in enumerate(prepared):
+        location = finding["location"]
+        comment = {"path": location["path"], "line": location["start_line"], "side": "RIGHT"}
+        if edit is not None and i not in conflicts:
+            # Bound compile work independently of the finding count. Unsupported
+            # dependencies/toolchains and build failures keep the detection.
+            if compiled >= 3:
+                edit = None
+            else:
+                compiled += 1
+                if not compile_suggestion(sources[location["path"]], edit, finding["suggestion"]["replacement"]):
+                    edit = None
+        if edit is not None and i not in conflicts:
+            replacement = finding["suggestion"]["replacement"]
+            terminator = "" if replacement.endswith("\n") else "\n"
+            proposed = body + f"\n\nIssue observed at line {location['start_line']}. Suggested edit for human review:\n\n```suggestion\n{replacement}{terminator}```"
+            if len(proposed) <= 65536:
+                comment["line"] = edit["end_line"]
+                if edit["start_line"] != edit["end_line"]:
+                    comment.update(start_line=edit["start_line"], start_side="RIGHT")
+                body = proposed
         if len(body) > 65536:
             raise ValueError("inline report exceeds GitHub comment limit; private report retained")
-        comments.append({"path": path, "line": line, "side": "RIGHT", "body": body})
+        comment["body"] = body
+        comments.append(comment)
     return comments
 
 
@@ -199,7 +278,7 @@ def review_local(repo, pr, comment_id, out, skill_dir, source_repo, *, post=Fals
                 posted_url = duplicate["html_url"]
                 break
         if posted_url is None:
-            comments = _inline_comments(repo, pr, result) if inline else None
+            comments = _inline_comments(repo, pr, result, head_sha=head) if inline else None
             latest = _gh(f"repos/{repo}/pulls/{pr}")
             latest_comment = _gh(f"repos/{repo}/issues/comments/{comment_id}")
             _identity(repo, pr, comment_id, metadata, latest, latest_comment)

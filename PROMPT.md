@@ -29,8 +29,28 @@ must contain exactly these keys:
     "end_col": 0
   },
   "message": "A short explanation of the unsafe use and its consequence.",
-  "suggestion": {"text": "A safe way to handle the error.", "replacement": ""}
+  "suggestion": {
+    "text": "A safe way to handle the error.",
+    "replacement": "",
+    "edit": null
+  }
 }
+
+When you can propose a safe code fix, replace suggestion.edit with exactly
+{"start_line": 1, "end_line": 1, "original": "exact original source lines"}
+and put the complete replacement code in suggestion.replacement. Select a
+small inclusive range of existing full lines in this same source file. This
+edit range may differ from location, which must still identify the unsafe use.
+For an insertion, replace an existing line with that line plus the new code;
+do not invent a zero-width range. Copy original exactly, excluding numbered
+line prefixes and preserving tabs, joined by newline without a final newline.
+The replacement may be empty for a deletion. It must actually change the code.
+Keep the selected range and replacement within 50 lines and 8192 UTF-8 bytes
+each. Do not include markdown fences, carriage returns, NUL or other control
+characters except tabs and newlines. Do not claim that a proposed edit was
+executed, compiled or tested. When unsure of a safe exact edit, keep useful
+prose in suggestion.text, set edit to null and replacement to an empty string.
+An unavailable edit must never suppress a genuine finding.
 
 The line values above describe the shape, not an expected answer. Use the
 actual numbered source line. Zero columns mean unspecified. Do not include

@@ -5,6 +5,7 @@ from pathlib import Path, PurePosixPath
 
 from . import model_adapter
 from .build_request import checked_path, read_regular
+from .suggestions import lf_lines, validate_edit
 
 RULE = 'error-handling-go/continue-after-error'
 OperationalError = model_adapter.OperationalError
@@ -39,7 +40,9 @@ def _valid_finding(row, source):
     if not isinstance(row['message'], str) or not row['message'].strip():
         return False
     suggestion = row['suggestion']
-    if not isinstance(suggestion, dict) or set(suggestion) != {'text', 'replacement'} or any(not isinstance(v, str) for v in suggestion.values()):
+    if (not isinstance(suggestion, dict) or set(suggestion) not in
+            ({'text', 'replacement'}, {'text', 'replacement', 'edit'})
+            or not isinstance(suggestion['text'], str)):
         return False
     loc = row['location']
     if not isinstance(loc, dict) or set(loc) != {'path', 'start_line', 'end_line', 'start_col', 'end_col'} or loc['path'] != 'review.go':
@@ -88,7 +91,8 @@ def run_check(request, skill, *, allow_live=False):
         if len(eligible) != 1 or len(changed) != 1:
             raise OperationalError('Local brain accepts exactly one changed Go fixture')
         path = eligible[0]['path']
-        source = _read_regular(root, path).splitlines()
+        source_text = _read_regular(root, path)
+        source = lf_lines(source_text)
         diff_path = request['diff']['location']
         if Path(diff_path).is_absolute():
             try:
@@ -102,7 +106,7 @@ def run_check(request, skill, *, allow_live=False):
             raise OperationalError('Unsupported check')
         # Replace names in diff header metadata only; preserve all source lines.
         blinded = []
-        for line in diff.splitlines():
+        for line in lf_lines(diff):
             if line.startswith(('diff --git ', '--- ', '+++ ', 'rename from ', 'rename to ', 'copy from ', 'copy to ')):
                 line = line.replace(path, 'review.go')
             blinded.append(line)
@@ -116,7 +120,7 @@ def run_check(request, skill, *, allow_live=False):
         rows = json.loads(response['text'])
         if not isinstance(rows, list):
             raise OperationalError('Model output must be a JSON array')
-        findings = []; dropped = 0; columns_omitted = 0
+        findings = []; dropped = 0; columns_omitted = 0; suggestions_rejected = 0
         for row in rows:
             row = copy.deepcopy(row)
             omitted = _omit_invalid_columns(row, source)
@@ -124,13 +128,23 @@ def run_check(request, skill, *, allow_live=False):
                 dropped += 1
                 continue
             result = copy.deepcopy(row)
+            suggestion = result['suggestion']
+            proposed = suggestion.get('edit') is not None or suggestion['replacement'] != ''
+            edit, reason = validate_edit(suggestion.get('edit'), suggestion['replacement'], source)
+            if '\r' in source_text:
+                edit = None
+            if edit is None and proposed:
+                suggestions_rejected += 1
+            result['suggestion'] = {'text': suggestion['text'],
+                'replacement': suggestion['replacement'] if edit is not None else '', 'edit': edit}
             result['location']['path'] = path
             result.update(id=f'finding-{len(findings) + 1}', confidence=None, enforcing=False)
             findings.append(result)
             columns_omitted += int(omitted)
-        provenance = {'engine_version': 'poc-0.1.1', 'image_digest': '',
+        provenance = {'engine_version': 'poc-0.2.0', 'image_digest': '',
                       **{key: response[key] for key in ('model', 'duration_ms', 'tokens', 'cost_usd')}}
-        return {'findings': findings, 'dropped': dropped, 'columns_omitted': columns_omitted, 'provenance': provenance,
+        return {'findings': findings, 'dropped': dropped, 'columns_omitted': columns_omitted,
+                'suggestions_rejected': suggestions_rejected, 'provenance': provenance,
                 'receipts': {'raw_model_response': response.get('raw_response'), 'model_context': context,
                              'alias_map': {'review.go': path}, 'cost_basis': response['receipt_basis']}}
     except (KeyError, TypeError, ValueError, OSError, UnicodeError):
