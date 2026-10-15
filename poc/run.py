@@ -146,6 +146,7 @@ def run_request(request_path, result_path, skill_dir, *, allow_live=False):
         return 0
     except (RuntimeError, ValueError, TypeError, KeyError, OSError) as exc:
         safe_codes = {"model_transport_failed", "model_usage_invalid", "model_usage_missing",
+                      "model_timeout", "model_response_too_large",
                       "model_response_unfinished", "model_response_nontext", "model_response_no_text",
                       "model_receipt_invalid", "model_decode_invalid", "model_redirect_refused",
                       "model_configuration_missing", "model_configuration_invalid",
