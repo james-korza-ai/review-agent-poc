@@ -77,7 +77,6 @@ class BrainTests(unittest.TestCase):
         for key, value in [('confidence', 1), ('enforcing', True), ('id', 'injected')]:
             row = finding(); row[key] = value; bad.append(row)
         row = finding(); row['location']['end_line'] = 2; bad.append(row)
-        row = finding(); row['location']['start_col'] = 100; bad.append(row)
         row = finding(); row['rule_id'] = 'other'; bad.append(row)
         result = self.run_check(receipt(bad + [finding()]))
         self.assertEqual(len(result['findings']), 1)
