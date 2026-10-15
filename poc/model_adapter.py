@@ -13,6 +13,7 @@ import time
 import subprocess
 import fcntl
 import signal
+from contextlib import contextmanager
 from pathlib import Path
 import urllib.error
 import urllib.request
@@ -103,6 +104,24 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         raise OperationalError('Model endpoint redirect refused', code='model_redirect_refused')
 
 
+@contextmanager
+def _http_deadline(seconds):
+    """Main-thread Unix wall deadline, without replacing an active caller timer."""
+    previous = signal.getsignal(signal.SIGALRM)
+    timer = signal.getitimer(signal.ITIMER_REAL)
+    if timer != (0.0, 0.0):
+        raise OperationalError('Active caller timer prevents model call', code='model_configuration_invalid')
+    def expired(signum, frame):
+        raise TimeoutError('Model HTTP wall deadline expired')
+    try:
+        signal.signal(signal.SIGALRM, expired)
+        signal.setitimer(signal.ITIMER_REAL, seconds)
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
 def _gemini_transport(prompt, context, *, endpoint, model, key, timeout_seconds, max_tokens,
                       max_output_tokens=None):
     """Single HTTP attempt; caller must supply already approved runtime policy."""
@@ -132,13 +151,14 @@ def _gemini_transport(prompt, context, *, endpoint, model, key, timeout_seconds,
     started = time.monotonic()
     try:
         # Sole external model HTTP call; no retries or fallback transport.
-        with opener.open(request, timeout=timeout_seconds) as response:
-            encoded = response.read(8 * 1024 * 1024 + 1)
+        with _http_deadline(timeout_seconds):
+            with opener.open(request, timeout=timeout_seconds) as response:
+                encoded = response.read(8 * 1024 * 1024 + 1)
         if len(encoded) > 8 * 1024 * 1024:
             raise OperationalError('Model response exceeds receipt size limit', code='model_response_too_large')
         duration = (time.monotonic() - started) * 1000
         if duration > timeout_seconds * 1000:
-            raise OperationalError('Model response exceeded timeout', code='model_timeout')
+            raise OperationalError('Completed model response exceeded budget', code='model_budget_exceeded')
         return json.loads(encoded), duration
     except urllib.error.HTTPError as exc:
         # Only a bounded integer status crosses this boundary. Never retain the
@@ -148,7 +168,12 @@ def _gemini_transport(prompt, context, *, endpoint, model, key, timeout_seconds,
         raise OperationalError('Model HTTP request failed; attempt unfinished', code=code) from None
     except (json.JSONDecodeError, UnicodeDecodeError):
         raise OperationalError('Model response was not valid JSON', code='model_decode_invalid') from None
-    except (urllib.error.URLError, OSError, ValueError):
+    except TimeoutError:
+        raise OperationalError('Model HTTP timed out; usage is unknown', code='model_timeout') from None
+    except urllib.error.URLError as exc:
+        code = 'model_timeout' if isinstance(exc.reason, TimeoutError) else 'model_transport_failed'
+        raise OperationalError('Model transport failed; usage is unknown', code=code) from None
+    except (OSError, ValueError):
         # Exception/body/URL details may contain credentials; never echo them.
         raise OperationalError('Model transport failed; attempt unfinished', code='model_transport_failed') from None
 

@@ -14,6 +14,50 @@ def _ratio(numerator, denominator):
     return numerator / denominator if denominator else None
 
 
+def _physical_attempts(root):
+    """Account for all retry-v1 attempts, including interrupted/unknown usage."""
+    rows=[]
+    for directory in sorted(root.glob('*/run-*/attempts/attempt-*')):
+        if not (directory/'started.json').exists():
+            continue
+        path=directory/'outcome.json'
+        outcome=json.loads(path.read_text()) if path.exists() else {
+            'status':'inflight','tokens':None,'cost_usd':None,'duration_ms':None}
+        result_path=directory/'result.json'
+        sidecar_path=directory/'result.json.diagnostics.json'
+        known=False
+        if outcome.get('status')=='completed' and result_path.exists() and sidecar_path.exists():
+            result=json.loads(result_path.read_text())
+            diagnostic=json.loads(sidecar_path.read_text())
+            provenance=result.get('provenance',{})
+            receipts=diagnostic.get('receipts',{})
+            try:
+                model_adapter.validate_receipt(provenance,require_basis=False)
+                known=(diagnostic.get('status')=='completed' and isinstance(receipts.get('raw_model_response'),dict)
+                       and isinstance(receipts.get('cost_basis'),str) and bool(receipts['cost_basis'].strip())
+                       and outcome.get('cost_usd')==provenance['cost_usd'] and outcome.get('tokens')==provenance['tokens'])
+            except model_adapter.OperationalError:
+                pass
+        if not known:
+            outcome={**outcome,'tokens':None,'cost_usd':None}
+        rows.append({**outcome,'trial':f'{directory.parents[2].name}/{directory.parents[1].name}',
+                     'directory':str(directory.relative_to(root))})
+    if not rows:
+        return None
+    known_costs=[r['cost_usd'] for r in rows if model_adapter.nonnegative_number(r.get('cost_usd'))]
+    durations=[r['duration_ms'] for r in rows if model_adapter.nonnegative_number(r.get('duration_ms'))]
+    known_tokens={key:[r['tokens'][key] for r in rows if isinstance(r.get('tokens'),dict)
+                      and type(r['tokens'].get(key)) is int and r['tokens'][key]>=0] for key in ('in','out')}
+    return {'protocol':'bounded-transient-retry-v1','count':len(rows),'attempts':rows,
+            'unknown_cost_attempts':len(rows)-len(known_costs),
+            'known_cost_estimate_usd':sum(known_costs) if known_costs else None,
+            'cost_usd':sum(known_costs) if len(known_costs)==len(rows) else None,
+            'duration_ms':sum(durations) if len(durations)==len(rows) else None,
+            'median_duration_ms':statistics.median(durations) if durations else None,
+            'worst_duration_ms':max(durations) if durations else None,
+            'tokens':{key:sum(values) if len(values)==len(rows) else None for key,values in known_tokens.items()}}
+
+
 def score(reports, answer_key, expected_runs=18):
     if expected_runs != 18:
         raise ValueError('This POC plans exactly six cases and three trials each')
@@ -163,6 +207,16 @@ def main(argv=None):
                 report['provenance'] = {**report.get('provenance', {}), 'cost_usd': None}
             reports.append(report)
         output = score(reports, json.loads(args.answer_key.read_text()))
+        physical=_physical_attempts(args.results)
+        if physical is not None:
+            output['physical_attempts']=physical
+            # Quality uses the final logical answers. Whole-batch resource totals
+            # must also include failed physical calls whose usage may be unknown.
+            output['observed'].update(cost_usd=physical['cost_usd'],tokens=physical['tokens'],
+                                      duration_ms=physical['duration_ms'],
+                                      unavailable_cost_receipts=physical['unknown_cost_attempts'],
+                                      median_duration_ms=physical['median_duration_ms'],
+                                      worst_duration_ms=physical['worst_duration_ms'])
         args.output.write_text(json.dumps(output, indent=2, allow_nan=False) + '\n')
         args.output.chmod(0o600)
     except (OSError, ValueError, TypeError, KeyError) as exc:
