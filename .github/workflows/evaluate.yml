@@ -12,7 +12,7 @@ jobs:
       github.repository == 'james-korza-ai/review-agent-poc' &&
       github.actor == github.repository_owner && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - name: Read trusted engine and synthetic fixtures
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -32,6 +32,9 @@ jobs:
           MODEL_MAX_OUTPUT_TOKENS: '8192'
           MODEL_COST_BASIS: 'Official standard rates checked 2026-10-15: https://ai.google.dev/gemini-api/docs/pricing ; estimate, not an invoice or spend cap.'
         run: python3 -m poc.evaluate run --out "$RUNNER_TEMP/evaluation"
+      - name: Check exact suggested edits without executing proposed code
+        if: always()
+        run: python3 -m poc.evaluate_suggestions --out "$RUNNER_TEMP/evaluation"
       - name: Score every planned trial
         if: always()
         run: python3 -m poc.evaluate score --out "$RUNNER_TEMP/evaluation"
@@ -45,6 +48,7 @@ jobs:
             ${{ runner.temp }}/evaluation/manifest.json
             ${{ runner.temp }}/evaluation/scorecard.json
             ${{ runner.temp }}/evaluation/pass-bar.json
+            ${{ runner.temp }}/evaluation/suggestions.json
             ${{ runner.temp }}/evaluation/readout.md
           if-no-files-found: error
           retention-days: 1

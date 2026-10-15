@@ -56,7 +56,9 @@ def prepare(out):
         'protocol':PROTOCOL,'max_attempts_per_trial':MAX_ATTEMPTS,'batch_wall_seconds':BATCH_SECONDS,
         'trial_wall_seconds':TRIAL_SECONDS,'reserved_tokens_per_trial':TOKEN_CEILING*MAX_ATTEMPTS,
         'max_physical_attempts':18*MAX_ATTEMPTS,'reserved_tokens_per_batch':18*MAX_ATTEMPTS*TOKEN_CEILING,
-        'rule_digest':load_skill(ROOT)['digest'],'cases':list(CASES),'trials_per_case':3,
+        'rule_digest':load_skill(ROOT)['digest'], 'rule_version':load_skill(ROOT)['metadata']['version'],
+        'suggestion_checks':'six exact-source edits must compile; proposed code is never executed',
+        'cases':list(CASES),'trials_per_case':3,
         'pass_bar_status':'provisional, not team-agreed','model':os.environ.get('MODEL_ID','gemini-3.1-flash-lite'),
         'max_tokens_per_call':TOKEN_CEILING,'timeout_seconds_per_call':TIMEOUT_SECONDS,
         'cost_kind':'uncached list-price estimate, not invoice or provider hard cap'})
@@ -154,6 +156,11 @@ def summarize(out):
     score_main(['--results',str(out/'results'),'--answer-key',str(ROOT/'answer-key.json'),'--output',str(out/'scorecard.json')])
     scorecard=json.loads((out/'scorecard.json').read_text())
     bar=pass_bar(scorecard)
+    suggestion_path=out/'suggestions.json'
+    suggestions=json.loads(suggestion_path.read_text()) if suggestion_path.is_file() else {}
+    bar['suggestions_met']=(suggestions.get('met') is True and suggestions.get('valid_bug_edits')==6
+        and suggestions.get('clean_trials_without_findings')==12 and suggestions.get('proposed_code_executed') is False)
+    bar['overall_met']=bar['met'] and bar['suggestions_met']
     physical=scorecard.get('physical_attempts',{})
     write_json(out/'pass-bar.json',bar)
     lines=['# Six-fixture evaluation','',f"Model: {scorecard['model']}",
@@ -169,6 +176,8 @@ def summarize(out):
         f"Protocol: {PROTOCOL}. Max 2 physical attempts only for HTTP 429/503 or actual timeout; no answer/schema retries.",
         f"Bounds: {BATCH_SECONDS}s batch, {TRIAL_SECONDS}s logical trial, {TIMEOUT_SECONDS}s/16k tokens per attempt; max 36 calls and 32k reserved tokens per trial.",
         f"Quality criteria met: {bar['quality_met']}. Original complete-cost bar met: {bar['met']}.",
+        f"Exact-source compile-only edits: {suggestions.get('valid_bug_edits',0)}/6. Updated full bar met: {bar['overall_met']}.",
+        'Compilation is not semantic approval; all suggestions require human review. No proposed program or tests execute.',
         f"Physical attempts: {physical.get('count','unavailable')}; unknown cost receipts: {physical.get('unknown_cost_attempts','unavailable')}.",
         f"Known attempt cost estimates: {physical.get('known_cost_estimate_usd')} USD; this is not the whole-batch total when any receipt is unknown.",
         'Failed attempts with unavailable usage make aggregate tokens/cost unknown; known successful estimates are not the whole-batch total.',
@@ -178,7 +187,7 @@ def summarize(out):
     if os.environ.get('GITHUB_STEP_SUMMARY'):
         with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a') as handle:handle.write(text)
     print(text)
-    return 0 if bar['met'] else 2
+    return 0 if bar['overall_met'] else 2
 
 
 def main(argv=None):

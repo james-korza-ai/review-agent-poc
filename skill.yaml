@@ -1,6 +1,6 @@
 {
   "name": "error-handling-go/continue-after-error",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "language": "go",
   "severity": "medium",
   "enforce": false,
