@@ -121,7 +121,7 @@ def run_request(request_path, result_path, skill_dir, *, allow_live=False):
             status = "ok"
         else:
             checked = {"findings": [], "dropped": 0,
-                       "provenance": {"engine_version": "poc-0.1", "image_digest": "", "model": "not-called",
+                       "provenance": {"engine_version": "poc-0.1.1", "image_digest": "", "model": "not-called",
                                       "duration_ms": 0, "tokens": {"in": 0, "out": 0}, "cost_usd": 0}}
             status = "skipped"
         findings = checked["findings"]
@@ -133,6 +133,7 @@ def run_request(request_path, result_path, skill_dir, *, allow_live=False):
                   "provenance": checked["provenance"]}
         diagnostic = {"status": "completed", "request_id": request_id, "trigger_fired": fired,
                       "dropped": checked["dropped"], "receipts": checked.get("receipts", {}),
+                      "columns_omitted": checked.get("columns_omitted", 0),
                       "scope": "local POC; no graduation or vendor-parity evidence"}
         # Serialization failures must be reported before publishing success diagnostics.
         json.dumps(result, allow_nan=False)
