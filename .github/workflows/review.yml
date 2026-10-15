@@ -1,0 +1,112 @@
+name: On-demand Go review
+on:
+  issue_comment:
+    types: [created]
+permissions: {}
+concurrency:
+  group: review-${{ github.event.issue.number }}
+  cancel-in-progress: false
+jobs:
+  review:
+    if: >-
+      github.event.issue.pull_request &&
+      github.event.comment.body == '/review' &&
+      github.event.comment.user.login == github.repository_owner
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+    outputs:
+      pr: ${{ steps.prepare.outputs.pr }}
+      comment_id: ${{ steps.prepare.outputs.comment_id }}
+      head_sha: ${{ steps.prepare.outputs.head_sha }}
+      base_sha: ${{ steps.prepare.outputs.base_sha }}
+      request_id: ${{ steps.prepare.outputs.request_id }}
+    steps:
+      - name: Get trusted default-branch engine
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: engine
+          persist-credentials: false
+      - name: Authorize owner command and pin PR commits
+        id: identify
+        working-directory: engine
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -m poc.prepare_github identify --out "$RUNNER_TEMP/review-case"
+      - name: Read pinned PR source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ steps.identify.outputs.head_sha }}
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: false
+          lfs: false
+      - name: Build request from actual commits
+        id: prepare
+        working-directory: engine
+        run: python3 -m poc.prepare_github prepare --source "$GITHUB_WORKSPACE/source" --out "$RUNNER_TEMP/review-case"
+      - name: Review made-up Go code
+        working-directory: engine
+        env:
+          MODEL_PROVIDER: gemini
+          MODEL_ID: gemini-3.8-flash
+          MODEL_ENDPOINT: https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent
+          MODEL_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          MODEL_INPUT_USD_PER_MILLION: '0.75'
+          MODEL_OUTPUT_USD_PER_MILLION: '3.75'
+          MODEL_MAX_OUTPUT_TOKENS: '8192'
+          MODEL_COST_BASIS: 'Official standard rates through 2026-12-31: https://ai.google.dev/gemini-api/docs/pricing ; estimate, not an invoice or spend cap.'
+        run: python3 -m poc.prepare_github run --skill-dir "$GITHUB_WORKSPACE/engine" --out "$RUNNER_TEMP/review-case"
+      - name: Retain review receipts
+        if: always() && steps.prepare.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: review-receipts
+          path: |
+            ${{ runner.temp }}/review-case/request.json
+            ${{ runner.temp }}/review-case/result.json
+            ${{ runner.temp }}/review-case/result.json.diagnostics.json
+          if-no-files-found: error
+          retention-days: 1
+  report:
+    needs: review
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+      checks: write
+    steps:
+      - name: Get trusted reporter
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: engine
+          persist-credentials: false
+      - name: Read this run's receipts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: review-receipts
+          path: receipts
+      - name: Post inline findings and neutral check
+        working-directory: engine
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVIEW_PR: ${{ needs.review.outputs.pr }}
+          REVIEW_COMMENT: ${{ needs.review.outputs.comment_id }}
+          REVIEW_HEAD: ${{ needs.review.outputs.head_sha }}
+          REVIEW_BASE: ${{ needs.review.outputs.base_sha }}
+          REVIEW_REQUEST: ${{ needs.review.outputs.request_id }}
+        run: >-
+          python3 -m poc.report_github --repo "$GITHUB_REPOSITORY"
+          --pr "$REVIEW_PR" --comment-id "$REVIEW_COMMENT"
+          --head-sha "$REVIEW_HEAD" --base-sha "$REVIEW_BASE"
+          --request-id "$REVIEW_REQUEST" --skill-dir "$GITHUB_WORKSPACE/engine"
+          --request "$GITHUB_WORKSPACE/receipts/request.json"
+          --result "$GITHUB_WORKSPACE/receipts/result.json"

@@ -1,7 +1,8 @@
-"""Model adapters: offline Gemini preparation and an explicit local CLI demo.
+"""Model adapters: explicit Gemini API and separate local Claude CLI demos.
 
-Gemini live calls remain blocked on provider controls. The separately authorized
-Claude CLI demo uses normal local sign-in, not a copied key or hosted CI secret.
+Gemini uses operator-selected model/pricing and a scoped API secret. Reported
+cost is a usage-based list-price estimate, not a bill or provider spend cap.
+The Claude CLI route uses normal local sign-in, never a hosted CI credential.
 REST shape: https://ai.google.dev/api/generate-content
 """
 import json
@@ -42,11 +43,26 @@ def validate_receipt(receipt, *, require_basis=True):
         raise OperationalError('Missing cost receipt basis')
 
 
+def _gemini_usage(raw):
+    """Validate text-only usage, including thinking; no tool-use pricing applies."""
+    try:
+        usage = raw['usageMetadata']
+        prompt, output, total = (usage[k] for k in ('promptTokenCount', 'candidatesTokenCount', 'totalTokenCount'))
+        thinking, cached = usage.get('thoughtsTokenCount', 0), usage.get('cachedContentTokenCount', 0)
+        if any(type(n) is not int or n < 0 for n in (prompt, output, total, thinking, cached)):
+            raise OperationalError('Invalid Gemini usage receipt')
+        if total != prompt + output + thinking or cached > prompt or usage.get('toolUsePromptTokenCount', 0) != 0:
+            raise OperationalError('Unsupported or inconsistent Gemini usage receipt')
+        return prompt, total - prompt
+    except (KeyError, TypeError, ValueError):
+        raise OperationalError('Missing Gemini usage receipt') from None
+
+
 def decode_gemini(raw, *, duration_ms, cost_receipt):
     """Decode measured usage; Gemini does not supply a USD billing receipt.
 
-    cost_receipt must come from an independently established cost mechanism,
-    never model prose. No such mechanism is enabled by the current live gate.
+    cost_receipt is controller-computed from actual provider usage and trusted
+    unit prices. Its basis must distinguish estimates from billed cost.
     """
     if not isinstance(cost_receipt, dict) or not nonnegative_number(cost_receipt.get('cost_usd')) or not isinstance(cost_receipt.get('basis'), str) or not cost_receipt['basis'].strip():
         raise OperationalError('Missing cost receipt and basis')
@@ -55,16 +71,22 @@ def decode_gemini(raw, *, duration_ms, cost_receipt):
         if len(candidates) != 1 or candidates[0]['finishReason'] != 'STOP':
             raise OperationalError('Model response unfinished or blocked')
         parts = candidates[0]['content']['parts']
-        if not parts or any(set(p) != {'text'} or not isinstance(p['text'], str) for p in parts):
+        if not isinstance(parts, list) or not parts:
             raise OperationalError('Unexpected non-text model response')
-        usage = raw['usageMetadata']
-        prompt, output, total = (usage[k] for k in ('promptTokenCount', 'candidatesTokenCount', 'totalTokenCount'))
-        if any(type(n) is not int or n < 0 for n in (prompt, output, total)) or total < prompt + output:
-            raise OperationalError('Invalid token receipt')
+        for part in parts:
+            if not isinstance(part, dict) or not part or set(part) - {'text', 'thoughtSignature'}:
+                raise OperationalError('Unexpected non-text model response')
+            if any(not isinstance(value, str) for value in part.values()):
+                raise OperationalError('Unexpected non-text model response')
+        if not any('text' in part for part in parts):
+            raise OperationalError('Missing model text response')
+        prompt, output = _gemini_usage(raw)
         # Total includes thinking/other generated tokens, unlike candidate text alone.
-        decoded = {'text': ''.join(p['text'] for p in parts), 'raw_response': raw,
+        # Gemini 3 can attach opaque thought signatures; this single-turn caller
+        # retains them only in raw evidence, never in the findings JSON text.
+        decoded = {'text': ''.join(p.get('text', '') for p in parts), 'raw_response': raw,
                    'model': 'gemini/' + raw['modelVersion'], 'duration_ms': duration_ms,
-                   'tokens': {'in': prompt, 'out': total - prompt},
+                   'tokens': {'in': prompt, 'out': output},
                    'cost_usd': cost_receipt['cost_usd'], 'receipt_basis': cost_receipt['basis']}
         validate_receipt(decoded)
         return decoded
@@ -77,7 +99,8 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         raise OperationalError('Model endpoint redirect refused')
 
 
-def _gemini_transport(prompt, context, *, endpoint, model, key, timeout_seconds, max_tokens):
+def _gemini_transport(prompt, context, *, endpoint, model, key, timeout_seconds, max_tokens,
+                      max_output_tokens=None):
     """Single HTTP attempt; caller must supply already approved runtime policy."""
     if not re.fullmatch(r'[A-Za-z0-9._-]+', model) or model in ('latest', 'auto'):
         raise OperationalError('Explicit model ID required')
@@ -86,16 +109,19 @@ def _gemini_transport(prompt, context, *, endpoint, model, key, timeout_seconds,
         raise OperationalError('Unsupported model endpoint; exact official Gemini model URL required')
     if type(timeout_seconds) not in (int, float) or not math.isfinite(timeout_seconds) or timeout_seconds <= 0 or type(max_tokens) is not int or max_tokens < 1:
         raise OperationalError('Positive timeout and token budget required')
+    if max_output_tokens is not None and (type(max_output_tokens) is not int or max_output_tokens < 1):
+        raise OperationalError('Positive model output token limit required')
     body = {'systemInstruction': {'parts': [{'text': prompt}]},
             'contents': [{'role': 'user', 'parts': [{'text': json.dumps(context, ensure_ascii=True)}]}],
-            'generationConfig': {'maxOutputTokens': max_tokens, 'responseMimeType': 'application/json', 'candidateCount': 1}}
+            'generationConfig': {'maxOutputTokens': max_tokens, 'responseMimeType': 'application/json'}}
+    # Gemini 3+ rejects candidateCount; default single candidate is checked on receipt.
     # Reserve output tokens from the same total ceiling. Bytes are a conservative
     # upper bound here, not a claimed measured tokenizer receipt.
     input_ceiling = len(json.dumps(body).encode('utf-8'))
     output_ceiling = max_tokens - input_ceiling
     if output_ceiling < 1:
         raise OperationalError('Context exceeds conservative token budget; split input before live use')
-    body['generationConfig']['maxOutputTokens'] = output_ceiling
+    body['generationConfig']['maxOutputTokens'] = min(output_ceiling, max_output_tokens or output_ceiling)
     request = urllib.request.Request(endpoint, data=json.dumps(body).encode('utf-8'),
                                      headers={'Content-Type': 'application/json', 'x-goog-api-key': key}, method='POST')
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
@@ -122,11 +148,33 @@ def call_model(prompt, context, *, timeout_seconds, max_tokens, allow_live=False
     if provider == 'claude-cli':
         return _claude_cli(prompt, context, timeout_seconds=timeout_seconds, max_tokens=max_tokens)
     if provider != 'gemini':
-        raise OperationalError('Only Gemini REST is implemented; provider must be selected explicitly')
-    # A flag or local run counter cannot establish a provider-enforced hard cap.
-    # Keep this gate until the operator's actual provider mechanism and billing
-    # receipts are implemented and independently verified. No key is read here.
-    raise OperationalError('Provider spend enforcement and cost receipt acquisition are unimplemented; live call refused')
+        raise OperationalError('Provider must be selected explicitly: gemini or claude-cli')
+    model, endpoint, basis = (os.environ.get(name, '').strip()
+        for name in ('MODEL_ID', 'MODEL_ENDPOINT', 'MODEL_COST_BASIS'))
+    if not model or not endpoint or not basis:
+        raise OperationalError('Explicit Gemini model, endpoint and spend estimate configuration required')
+    try:
+        rates = [float(os.environ[name]) for name in
+                 ('MODEL_INPUT_USD_PER_MILLION', 'MODEL_OUTPUT_USD_PER_MILLION')]
+        output_limit = int(os.environ.get('MODEL_MAX_OUTPUT_TOKENS', '4096'))
+    except (KeyError, TypeError, ValueError):
+        raise OperationalError('Trusted Gemini unit prices and output limit required') from None
+    if not all(nonnegative_number(rate) for rate in rates) or output_limit < 1:
+        raise OperationalError('Invalid Gemini unit prices or output limit')
+    key = os.environ.get('MODEL_API_KEY', '')
+    if not key.strip():
+        raise OperationalError('Gemini API credential is unavailable')
+    raw, duration = _gemini_transport(prompt, context, endpoint=endpoint, model=model, key=key,
+        timeout_seconds=timeout_seconds, max_tokens=max_tokens, max_output_tokens=output_limit)
+    prompt_tokens, output_tokens = _gemini_usage(raw)
+    if prompt_tokens + output_tokens > max_tokens:
+        raise OperationalError('Gemini measured usage exceeded requested token budget')
+    estimate = (prompt_tokens * rates[0] + output_tokens * rates[1]) / 1_000_000
+    receipt_basis = ('Gemini uncached list-price estimate from provider usage, including thinking; '
+        'not billed cost or provider-enforced spend control. '
+        f'Input/output USD per million tokens: {rates[0]}/{rates[1]}. {basis}')
+    return decode_gemini(raw, duration_ms=duration,
+                         cost_receipt={'cost_usd': estimate, 'basis': receipt_basis})
 
 
 def claude_cli_environment():
