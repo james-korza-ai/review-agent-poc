@@ -30,7 +30,7 @@ Python, Git and `gh` are available on the GitHub-hosted runner. Actions are pinn
 to commit SHAs; no third-party Python package is installed. Add `GEMINI_API_KEY`
 as an Actions secret. It is exposed only to the model step, not the reporter.
 
-The workflow uses `gemini-3.8-flash`, at most 8192 generated tokens and one HTTP
+The workflow uses `gemini-3.1-flash-lite`, at most 8192 generated tokens and one HTTP
 attempt per command. Actual usage and a conservative list-price cost estimate
 are retained in the run's receipts for one day. This is not an invoice or a
 provider-enforced spend cap. The key's project controls billing and quotas.

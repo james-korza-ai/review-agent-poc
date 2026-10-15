@@ -54,13 +54,13 @@ jobs:
         working-directory: engine
         env:
           MODEL_PROVIDER: gemini
-          MODEL_ID: gemini-3.8-flash
-          MODEL_ENDPOINT: https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent
+          MODEL_ID: gemini-3.1-flash-lite
+          MODEL_ENDPOINT: https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent
           MODEL_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          MODEL_INPUT_USD_PER_MILLION: '0.75'
-          MODEL_OUTPUT_USD_PER_MILLION: '3.75'
+          MODEL_INPUT_USD_PER_MILLION: '0.25'
+          MODEL_OUTPUT_USD_PER_MILLION: '1.50'
           MODEL_MAX_OUTPUT_TOKENS: '8192'
-          MODEL_COST_BASIS: 'Official standard rates through 2026-12-31: https://ai.google.dev/gemini-api/docs/pricing ; estimate, not an invoice or spend cap.'
+          MODEL_COST_BASIS: 'Official standard rates checked 2026-10-15: https://ai.google.dev/gemini-api/docs/pricing ; estimate, not an invoice or spend cap.'
         run: python3 -m poc.prepare_github run --skill-dir "$GITHUB_WORKSPACE/engine" --out "$RUNNER_TEMP/review-case"
       - name: Retain review receipts
         if: always() && steps.prepare.outcome == 'success'
