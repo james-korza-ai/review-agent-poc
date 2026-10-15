@@ -21,6 +21,10 @@ import urllib.request
 class OperationalError(RuntimeError):
     """The check did not finish; never convert this into a passing review."""
 
+    def __init__(self, message, *, code='review_failed'):
+        super().__init__(message)
+        self.code = code if isinstance(code, str) and re.fullmatch(r'[a-z][a-z0-9_]{0,63}', code) else 'review_failed'
+
 
 def nonnegative_number(value):
     return type(value) in (int, float) and math.isfinite(value) and value >= 0
@@ -50,12 +54,12 @@ def _gemini_usage(raw):
         prompt, output, total = (usage[k] for k in ('promptTokenCount', 'candidatesTokenCount', 'totalTokenCount'))
         thinking, cached = usage.get('thoughtsTokenCount', 0), usage.get('cachedContentTokenCount', 0)
         if any(type(n) is not int or n < 0 for n in (prompt, output, total, thinking, cached)):
-            raise OperationalError('Invalid Gemini usage receipt')
+            raise OperationalError('Invalid Gemini usage receipt', code='model_usage_invalid')
         if total != prompt + output + thinking or cached > prompt or usage.get('toolUsePromptTokenCount', 0) != 0:
-            raise OperationalError('Unsupported or inconsistent Gemini usage receipt')
+            raise OperationalError('Unsupported or inconsistent Gemini usage receipt', code='model_usage_invalid')
         return prompt, total - prompt
     except (KeyError, TypeError, ValueError):
-        raise OperationalError('Missing Gemini usage receipt') from None
+        raise OperationalError('Missing Gemini usage receipt', code='model_usage_missing') from None
 
 
 def decode_gemini(raw, *, duration_ms, cost_receipt):
@@ -65,21 +69,21 @@ def decode_gemini(raw, *, duration_ms, cost_receipt):
     unit prices. Its basis must distinguish estimates from billed cost.
     """
     if not isinstance(cost_receipt, dict) or not nonnegative_number(cost_receipt.get('cost_usd')) or not isinstance(cost_receipt.get('basis'), str) or not cost_receipt['basis'].strip():
-        raise OperationalError('Missing cost receipt and basis')
+        raise OperationalError('Missing cost receipt and basis', code='model_cost_missing')
     try:
         candidates = raw['candidates']
         if len(candidates) != 1 or candidates[0]['finishReason'] != 'STOP':
-            raise OperationalError('Model response unfinished or blocked')
+            raise OperationalError('Model response unfinished or blocked', code='model_response_unfinished')
         parts = candidates[0]['content']['parts']
         if not isinstance(parts, list) or not parts:
-            raise OperationalError('Unexpected non-text model response')
+            raise OperationalError('Unexpected non-text model response', code='model_response_nontext')
         for part in parts:
             if not isinstance(part, dict) or not part or set(part) - {'text', 'thoughtSignature'}:
-                raise OperationalError('Unexpected non-text model response')
+                raise OperationalError('Unexpected non-text model response', code='model_response_nontext')
             if any(not isinstance(value, str) for value in part.values()):
-                raise OperationalError('Unexpected non-text model response')
+                raise OperationalError('Unexpected non-text model response', code='model_response_nontext')
         if not any('text' in part for part in parts):
-            raise OperationalError('Missing model text response')
+            raise OperationalError('Missing model text response', code='model_response_no_text')
         prompt, output = _gemini_usage(raw)
         # Total includes thinking/other generated tokens, unlike candidate text alone.
         # Gemini 3 can attach opaque thought signatures; this single-turn caller
@@ -91,12 +95,12 @@ def decode_gemini(raw, *, duration_ms, cost_receipt):
         validate_receipt(decoded)
         return decoded
     except (KeyError, TypeError, ValueError, IndexError):
-        raise OperationalError('Malformed or missing Gemini response receipt') from None
+        raise OperationalError('Malformed or missing Gemini response receipt', code='model_receipt_invalid') from None
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise OperationalError('Model endpoint redirect refused')
+        raise OperationalError('Model endpoint redirect refused', code='model_redirect_refused')
 
 
 def _gemini_transport(prompt, context, *, endpoint, model, key, timeout_seconds, max_tokens,
@@ -131,14 +135,22 @@ def _gemini_transport(prompt, context, *, endpoint, model, key, timeout_seconds,
         with opener.open(request, timeout=timeout_seconds) as response:
             encoded = response.read(8 * 1024 * 1024 + 1)
         if len(encoded) > 8 * 1024 * 1024:
-            raise OperationalError('Model response exceeds receipt size limit')
+            raise OperationalError('Model response exceeds receipt size limit', code='model_response_too_large')
         duration = (time.monotonic() - started) * 1000
         if duration > timeout_seconds * 1000:
-            raise OperationalError('Model response exceeded timeout')
+            raise OperationalError('Model response exceeded timeout', code='model_timeout')
         return json.loads(encoded), duration
+    except urllib.error.HTTPError as exc:
+        # Only a bounded integer status crosses this boundary. Never retain the
+        # provider body, exception text, headers, URL or credential in diagnostics.
+        status = exc.code
+        code = f'model_http_{status}' if type(status) is int and 100 <= status <= 599 else 'model_transport_failed'
+        raise OperationalError('Model HTTP request failed; attempt unfinished', code=code) from None
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise OperationalError('Model response was not valid JSON', code='model_decode_invalid') from None
     except (urllib.error.URLError, OSError, ValueError):
         # Exception/body/URL details may contain credentials; never echo them.
-        raise OperationalError('Model transport failed; attempt unfinished') from None
+        raise OperationalError('Model transport failed; attempt unfinished', code='model_transport_failed') from None
 
 
 def call_model(prompt, context, *, timeout_seconds, max_tokens, allow_live=False):
@@ -152,23 +164,23 @@ def call_model(prompt, context, *, timeout_seconds, max_tokens, allow_live=False
     model, endpoint, basis = (os.environ.get(name, '').strip()
         for name in ('MODEL_ID', 'MODEL_ENDPOINT', 'MODEL_COST_BASIS'))
     if not model or not endpoint or not basis:
-        raise OperationalError('Explicit Gemini model, endpoint and spend estimate configuration required')
+        raise OperationalError('Explicit Gemini model, endpoint and spend estimate configuration required', code='model_configuration_missing')
     try:
         rates = [float(os.environ[name]) for name in
                  ('MODEL_INPUT_USD_PER_MILLION', 'MODEL_OUTPUT_USD_PER_MILLION')]
         output_limit = int(os.environ.get('MODEL_MAX_OUTPUT_TOKENS', '4096'))
     except (KeyError, TypeError, ValueError):
-        raise OperationalError('Trusted Gemini unit prices and output limit required') from None
+        raise OperationalError('Trusted Gemini unit prices and output limit required', code='model_configuration_invalid') from None
     if not all(nonnegative_number(rate) for rate in rates) or output_limit < 1:
-        raise OperationalError('Invalid Gemini unit prices or output limit')
+        raise OperationalError('Invalid Gemini unit prices or output limit', code='model_configuration_invalid')
     key = os.environ.get('MODEL_API_KEY', '')
     if not key.strip():
-        raise OperationalError('Gemini API credential is unavailable')
+        raise OperationalError('Gemini API credential is unavailable', code='model_credential_missing')
     raw, duration = _gemini_transport(prompt, context, endpoint=endpoint, model=model, key=key,
         timeout_seconds=timeout_seconds, max_tokens=max_tokens, max_output_tokens=output_limit)
     prompt_tokens, output_tokens = _gemini_usage(raw)
     if prompt_tokens + output_tokens > max_tokens:
-        raise OperationalError('Gemini measured usage exceeded requested token budget')
+        raise OperationalError('Gemini measured usage exceeded requested token budget', code='model_budget_exceeded')
     estimate = (prompt_tokens * rates[0] + output_tokens * rates[1]) / 1_000_000
     receipt_basis = ('Gemini uncached list-price estimate from provider usage, including thinking; '
         'not billed cost or provider-enforced spend control. '
