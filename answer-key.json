@@ -1,0 +1,12 @@
+[
+  {
+    "rule_id": "error-handling-go/continue-after-error",
+    "path": "bug_01.go",
+    "line": 25
+  },
+  {
+    "rule_id": "error-handling-go/continue-after-error",
+    "path": "bug_02.go",
+    "line": 23
+  }
+]

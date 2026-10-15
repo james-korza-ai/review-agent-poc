@@ -1,0 +1,21 @@
+{
+  "skills": {
+    "run": [
+      "error-handling-go/continue-after-error"
+    ],
+    "config": {
+      "error-handling-go/continue-after-error": {
+        "enforce": false
+      }
+    }
+  },
+  "gate": {
+    "default_enforce": false,
+    "fail_on_severity": "high"
+  },
+  "budget": {
+    "max_files": 200,
+    "max_tokens": 400000,
+    "timeout_seconds": 600
+  }
+}

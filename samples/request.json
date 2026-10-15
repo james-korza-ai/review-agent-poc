@@ -1,0 +1,9 @@
+{ "schema_version": "1.0", "request_id": "uuid",
+  "provider": { "name": "github", "repo": "<owner>/<repo>", "pr_id": "0", "pr_url": "" },
+  "repo": { "root": ".", "base_ref": "main", "base_sha": "", "head_ref": "", "head_sha": "" },
+  "diff": { "location": "./out/change.diff", "changed_files": [ { "path": "<file>.go", "status": "modified", "added": 0, "removed": 0 } ] },
+  "untrusted": { "pr_title": "", "pr_description": "", "comments": [] },
+  "skills": { "run": ["error-handling-go/continue-after-error"], "config": { "error-handling-go/continue-after-error": { "enforce": false } } },
+  "gate": { "default_enforce": false, "fail_on_severity": "high" },
+  "output": { "format": "sarif+verdict", "path": "./out" },
+  "budget": { "max_files": 200, "max_tokens": 400000, "timeout_seconds": 600 } }

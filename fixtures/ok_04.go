@@ -1,0 +1,27 @@
+package fixtures
+
+import (
+	"errors"
+	"log"
+)
+
+type profile04 struct {
+	Name string
+}
+
+// fetchProfile04 returns nil and an error when no profile can be fetched.
+func fetchProfile04(id string) (*profile04, error) {
+	if id == "" {
+		return nil, errors.New("missing profile identifier")
+	}
+	return &profile04{Name: id}, nil
+}
+
+func displayProfile04(id string) (string, error) {
+	profile, err := fetchProfile04(id)
+	if err != nil {
+		log.Printf("fetch failed: %v", err)
+		return "", err
+	}
+	return profile.Name, nil
+}

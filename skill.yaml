@@ -1,0 +1,12 @@
+{
+  "name": "error-handling-go/continue-after-error",
+  "version": "0.4.1",
+  "language": "go",
+  "severity": "medium",
+  "enforce": false,
+  "triggers": {
+    "include": ["**/*.go"],
+    "exclude": ["**/*_test.go"],
+    "diff_contains": "call returning error"
+  }
+}

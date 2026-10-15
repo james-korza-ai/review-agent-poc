@@ -1,0 +1,7 @@
+{ "schema_version": "1.0", "request_id": "uuid",
+  "verdict": { "status": "pass", "reason": "no enforcing findings", "blocking_findings": [] },
+  "findings": [ { "id": "finding-1", "rule_id": "error-handling-go/continue-after-error", "skill": "error-handling-go", "severity": "medium", "confidence": null, "enforcing": false,
+      "location": { "path": "<file>.go", "start_line": 0, "end_line": 0, "start_col": 0, "end_col": 0 },
+      "message": "", "suggestion": { "text": "", "replacement": "" } } ],
+  "skills_run": [ { "skill": "error-handling-go/continue-after-error", "version": "0.4.1", "digest": "sha256:<hash of PROMPT.md + skill.yaml>", "enforcing": false, "findings": 0, "status": "ok" } ],
+  "provenance": { "engine_version": "poc-0.1", "image_digest": "", "model": "<provider>/<model id>", "duration_ms": 0, "tokens": { "in": 0, "out": 0 }, "cost_usd": 0 } }
