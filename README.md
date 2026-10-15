@@ -19,6 +19,20 @@ blocks the PR.
 4. A separate job validates the result and current diff, then posts inline
    comments and a neutral check with line annotations. It has no model key.
 
+A finding can include a native GitHub suggested change. The edit has its own
+line range and exact original text, separate from the line where the bug was
+found. The reporter checks the current commit, complete diff hunk, bounds and
+overlapping edits, then compiles the proposed one-file Go change without running
+it. Unsupported or invalid edits fall back to advice. Applying a suggestion is
+a human decision; compilation does not prove the fix is correct.
+
+Annotation rendering reuses the existing renderer in
+[`korzainc/shared-workflows`' public `ci-common` image](https://github.com/korzainc/shared-workflows/tree/ca100272df8971e477064cd211e0beb56c8d8208/images/ci-common),
+pinned by digest. It receives only validated finding data, with no network,
+mounts or credentials. The thin adapter retains neutral status and current-commit
+checks because shared security publishing has a different gating contract.
+No shared security defaults are changed and no private source is copied here.
+
 The policy decides that all findings are advisory. The model cannot approve a
 PR, enable blocking, choose tools or execute repository code. Changed commits
 require a fresh `/review`; stale results are refused. Duplicate delivery of the
@@ -29,6 +43,8 @@ same command does not post twice.
 Python, Git and `gh` are available on the GitHub-hosted runner. Actions are pinned
 to commit SHAs; no third-party Python package is installed. Add `GEMINI_API_KEY`
 as an Actions secret. It is exposed only to the model step, not the reporter.
+The reporter also uses the runner's Go compiler and Docker. Only the released,
+digest-pinned public image is pulled, using a fresh credential-free client config.
 
 The workflow uses `gemini-3.1-flash-lite`, at most 8192 generated tokens and one HTTP
 attempt per command. Actual usage and a conservative list-price cost estimate
@@ -63,6 +79,10 @@ Run the **Six-fixture evaluation** workflow manually on `main`. It reviews each
 of the six synthetic cases three times with the same model, then scores exact
 rule/file/line matches. The answer key is read only after model calls. Requests,
 raw responses, results and the scorecard are retained as a one-day artifact.
+After model calls, a separate stage requires all six bug trials to provide an
+exact-source edit that compiles, and all twelve valid-code trials to stay quiet.
+That updated output contract needs a fresh evaluation; the earlier scorecard
+does not establish its quality. Proposed code and generated tests never run.
 Failed or rejected-output trials never count as quiet successes. Evaluation uses
 `bounded-transient-retry-v1`: at most two physical attempts per logical trial,
 only after HTTP 429/503 or an actual timeout. Valid answers, schema errors, other

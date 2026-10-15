@@ -12,6 +12,7 @@ import subprocess
 import sys
 
 from . import review_local as local
+from .shared_annotations import render_annotations
 from .build_request import RULE, checked_path, read_regular, relative_path, validate_policy
 from .run import load_skill
 
@@ -74,8 +75,10 @@ def _validate(repo, pr, request, result, head, base, request_id, skill_dir):
             raise ValueError("invalid finding location")
         if not isinstance(finding["message"], str) or not finding["message"].strip():
             raise ValueError("invalid finding message")
-        _shape(finding["suggestion"], "text replacement")
-        if any(not isinstance(value, str) for value in finding["suggestion"].values()):
+        suggestion = finding["suggestion"]
+        if not isinstance(suggestion, dict) or set(suggestion) not in ({"text", "replacement"}, {"text", "replacement", "edit"}):
+            raise ValueError("invalid suggestion shape")
+        if any(not isinstance(suggestion[key], str) for key in ("text", "replacement")):
             raise ValueError("invalid suggestion")
     skills = result["skills_run"]
     if not isinstance(skills, list) or len(skills) != 1:
@@ -118,7 +121,8 @@ def report_github(repo, pr, comment_id, request_path, result_path, *, head_sha, 
     _validate(repo, pr, request, result, head_sha, base_sha, request_id, skill_dir)
     metadata = local._gh(f"repos/{repo}")
     _current(repo, pr, comment_id, metadata, head_sha, base_sha)
-    comments = local._inline_comments(repo, pr, result)
+    comments = local._inline_comments(repo, pr, result, head_sha=head_sha)
+    annotations = render_annotations(result["findings"])
     marker = f"<!-- local-review:{comment_id}:{head_sha} -->"
     review_url = None
     if comments:
@@ -143,12 +147,6 @@ def report_github(repo, pr, comment_id, request_path, result_path, *, head_sha, 
             break
         page += 1
     if check_url is None:
-        # The inline anchor has been checked against the current PR patch. Emit a
-        # single-line warning at that same verified line rather than an unchecked
-        # model-supplied end range. Annotation text is plain text in GitHub's API.
-        annotations = [{"path": row["path"], "start_line": row["line"], "end_line": row["line"],
-                        "annotation_level": "warning", "message": finding["message"]}
-                       for row, finding in zip(comments, result["findings"])]
         count = len(comments)
         summary = (f"{count} issue{'s' if count != 1 else ''} found in this Go error check."
                    if count else "No issues found by this Go error check.")

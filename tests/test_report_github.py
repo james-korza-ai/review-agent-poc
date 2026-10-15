@@ -30,7 +30,8 @@ class GithubReporterTests(unittest.TestCase):
         finding["message"] = "Continue after failed fetch"
         finding["suggestion"]["text"] = "Return after logging"
         from poc.run import load_skill
-        self.result["skills_run"][0].update(digest=load_skill(ROOT)["digest"], findings=1)
+        trusted_skill = load_skill(ROOT)
+        self.result["skills_run"][0].update(version=trusted_skill["metadata"]["version"], digest=trusted_skill["digest"], findings=1)
         self.pull = {"number": 1, "state": "open", "base": {"sha": BASE, "repo": {"full_name": REPO}},
                      "head": {"sha": HEAD, "repo": {"full_name": REPO}}}
         self.comment = {"id": 99, "body": "/review", "user": {"login": "personal"},
@@ -74,7 +75,13 @@ class GithubReporterTests(unittest.TestCase):
         (self.root / "request.json").write_text(json.dumps(self.request))
         (self.root / "result.json").write_text(json.dumps(self.result))
         # Reporter itself has no model call path; only GitHub is replaced.
-        with patch("poc.review_local._gh", side_effect=self.gh):
+        def annotations(findings):
+            if getattr(self, "annotation_error", None):
+                raise self.annotation_error
+            return [{"path": row["location"]["path"], "start_line": row["location"]["start_line"],
+                     "end_line": row["location"]["start_line"], "annotation_level": "warning", "message": row["message"]}
+                    for row in findings]
+        with patch("poc.review_local._gh", side_effect=self.gh), patch.object(reporter, "render_annotations", side_effect=annotations):
             return reporter.report_github(REPO, 1, 99, self.root / "request.json", self.root / "result.json",
                                           head_sha=HEAD, base_sha=BASE, request_id="trusted-request", skill_dir=ROOT)
 
@@ -185,6 +192,12 @@ class GithubReporterTests(unittest.TestCase):
         self.execute()
         self.assertEqual(len(self.reviews), 1)
         self.assertEqual(len(self.checks), 1)
+
+    def test_shared_annotation_failure_refuses_before_any_github_mutation(self):
+        self.annotation_error = ValueError("shared renderer unavailable")
+        with self.assertRaisesRegex(ValueError, "renderer"):
+            self.execute()
+        self.assertFalse(any(method == "POST" for _, method, _ in self.calls))
 
     def test_invalid_duration_is_refused_before_any_write(self):
         for value in (True, -1, -0.5, float("nan"), float("inf"), "1.5"):

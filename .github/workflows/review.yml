@@ -76,7 +76,7 @@ jobs:
   report:
     needs: review
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     permissions:
       contents: read
       pull-requests: write
@@ -94,6 +94,12 @@ jobs:
         with:
           name: review-receipts
           path: receipts
+      - name: Read the pinned shared annotation renderer
+        env:
+          CI_COMMON_IMAGE: ghcr.io/korzainc/ci-common:0.4.0@sha256:8624b45376876d905d09d176a77578add5a923df4f8982f1917ec7e3b7a16af3
+        run: |
+          renderer_config="$(mktemp -d "$RUNNER_TEMP/review-docker.XXXXXX")"
+          DOCKER_CONFIG="$renderer_config" /usr/bin/docker pull "$CI_COMMON_IMAGE"
       - name: Post inline findings and neutral check
         working-directory: engine
         env:
