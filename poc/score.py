@@ -73,6 +73,7 @@ def score(reports, answer_key, expected_runs=18):
         complete = (not report.get('_quality_exclusion') and receipts_ok
                     and report.get('verdict', {}).get('status') == 'pass'
                     and isinstance(statuses, list) and len(statuses) == 1
+                    and isinstance(statuses[0], dict)
                     and statuses[0].get('status') == 'ok'
                     and isinstance(report.get('findings'), list))
         row = {'case': case, 'run': trial, 'completed': complete,
@@ -88,14 +89,16 @@ def score(reports, answer_key, expected_runs=18):
                     if not isinstance(key[0], str) or not isinstance(key[1], str) or type(key[2]) is not int or key[2] < 1:
                         raise ValueError('Invalid finding key')
                     actual.add(key)
-                except (TypeError, KeyError):
-                    raise ValueError('Malformed finding in recorded result') from None
-            wanted = {item for item in expected if item[1] == case + '.go'}
-            hits, misses, false_flags = len(wanted & actual), len(wanted - actual), len(actual - wanted)
-            row.update(hits=hits, misses=misses, false_flags=false_flags,
-                       precision=_ratio(hits, hits + false_flags), recall=_ratio(hits, hits + misses))
-            for key in totals:
-                totals[key] += row[key]
+                except (TypeError, KeyError, ValueError):
+                    row.update(completed=False, quality_exclusion='malformed_findings')
+                    break
+            if row['completed']:
+                wanted = {item for item in expected if item[1] == case + '.go'}
+                hits, misses, false_flags = len(wanted & actual), len(wanted - actual), len(actual - wanted)
+                row.update(hits=hits, misses=misses, false_flags=false_flags,
+                           precision=_ratio(hits, hits + false_flags), recall=_ratio(hits, hits + misses))
+                for key in totals:
+                    totals[key] += row[key]
         rows.append(row)
     hits, misses, false_flags = (totals[k] for k in ('hits', 'misses', 'false_flags'))
     totals.update(precision=_ratio(hits, hits + false_flags), recall=_ratio(hits, hits + misses))
@@ -149,6 +152,13 @@ def main(argv=None):
                          or isinstance(model, str) and 'SIMULAT' in model.upper())
             if simulated:
                 report['_quality_exclusion'] = 'simulation'
+            elif type(sidecar.get('dropped')) is not int or sidecar['dropped'] < 0:
+                report['_quality_exclusion'] = 'invalid_dropped_count'
+            elif sidecar['dropped']:
+                # Rejected model findings cannot silently become a clean trial.
+                # Keep actual observed cost/tokens/duration even when quality
+                # metrics exclude this run; the call still consumed resources.
+                report['_quality_exclusion'] = 'dropped_findings'
             if simulated or not receipts.get('cost_basis') or raw_response is None:
                 report['provenance'] = {**report.get('provenance', {}), 'cost_usd': None}
             reports.append(report)
